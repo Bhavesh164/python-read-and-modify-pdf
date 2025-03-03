@@ -93,10 +93,13 @@ def merge_employee_data_and_zip(excel_file, pdf_template, output_folder, zip_nam
                 
                 emp_id = str(row['Emp ID'])
                 safe_emp_id = re.sub(r'[^\w\s-]', '', emp_id).strip().replace(' ', '_')
-                pdf_output_path = os.path.join(docs_folder, f"{safe_emp_id}.pdf")
+                emp_name = str(row['Name'])
+                safe_emp_name = re.sub(r'[^\w\s-]', '', emp_name).strip().replace(' ', '_')
+                file_name = safe_emp_id+"_"+safe_emp_name
+                pdf_output_path = os.path.join(docs_folder, f"{file_name}.pdf")
                 
                 replace_text_in_pdf(pdf_template, replacements, pdf_output_path)
-                zipf.write(pdf_output_path, arcname=f"{safe_emp_id}.pdf")
+                zipf.write(pdf_output_path, arcname=f"{file_name}.pdf")
                 os.remove(pdf_output_path)
                 print(f"  Processed employee ID: {emp_id}")
     

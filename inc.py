@@ -42,19 +42,6 @@ def merge_employee_data_and_zip(excel_file, word_template, output_folder, zip_na
         'Total CTC': '[Total CTC in INR]'
     }
 
-    # Define the columns that map to the repeated [amount in INR] placeholder in order
-    amount_columns = [
-        '2024 Bonus',              # index 0
-        'Basic Salary',            # index 1
-        'HRA',                     # index 2
-        'Other Allowences',        # index 3
-        'Provident Fund',          # index 4
-        'Company Deposit',         # index 5
-        'Total Fixed',             # index 6
-        'Bonus 2025 (At Target)',  # index 7
-        'Total CTC'                # index 8
-    ]
-
     # Current date in the format "February 26, 2025"
     current_date = datetime.datetime.now().strftime("%B %d, %Y")
 

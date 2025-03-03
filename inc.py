@@ -3,20 +3,21 @@ from docx import Document
 import re
 import os
 import zipfile
-from pathlib import Path
 import datetime
-import numpy as np
+import shutil
+from copy import deepcopy
 
-def merge_employee_data_and_zip(excel_file, word_template, output_folder, zip_name=None):
+def merge_employee_data_and_zip(excel_file, word_template, output_folder, zip_name=None, batch_size=50):
     """
     Read employee data from Excel, replace repeated placeholders in Word document,
-    and create a single zip file containing all documents
+    and create a single zip file containing all documents with improved performance.
 
     Args:
         excel_file (str): Path to Excel file with employee data
         word_template (str): Path to Word template with placeholders
         output_folder (str): Folder to save generated documents and final zip
         zip_name (str, optional): Name for the zip file. If None, uses current date
+        batch_size (int, optional): Number of documents to process in each batch
     """
     # Create output folder if it doesn't exist
     os.makedirs(output_folder, exist_ok=True)
@@ -49,83 +50,81 @@ def merge_employee_data_and_zip(excel_file, word_template, output_folder, zip_na
     docs_folder = os.path.join(output_folder, "temp_docs")
     os.makedirs(docs_folder, exist_ok=True)
 
-    # List to keep track of all generated files
-    generated_files = []
+    # Load the template document once
+    template_doc = Document(word_template)
 
-    # Process each row in the Excel file
-    for index, row in df.iterrows():
-        # Create a copy of the template for each employee
-        doc = Document(word_template)
-
-        # Replace placeholders in all paragraphs
-        for paragraph in doc.paragraphs:
-            # Replace date placeholder
-            if '[Date]' in paragraph.text:
-                paragraph.text = paragraph.text.replace('[Date]', current_date)
-
-            # Replace unique employee data placeholders
-            for excel_col, word_placeholder in placeholder_mapping.items():
-                if word_placeholder in paragraph.text:
-                    # Get the value from Excel
-                    if excel_col in df.columns:
-                        value = row[excel_col]
-                        # Check if the value is empty or NaN
-                        if pd.notna(value) and value != "":
-                            formatted_value = str(value)
-                            # Replace the placeholder with the formatted value
-                            paragraph.text = paragraph.text.replace(word_placeholder, formatted_value)
-
-        # Also check tables for placeholders
-        for table in doc.tables:
-            for row_idx in range(len(table.rows)):
-                for col_idx in range(len(table.columns)):
-                    cell = table.cell(row_idx, col_idx)
-
-                    # Replace date placeholder
-                    if '[Date]' in cell.text:
-                        cell.text = cell.text.replace('[Date]', current_date)
-
-                    # Replace unique employee data placeholders
-                    for excel_col, word_placeholder in placeholder_mapping.items():
-                        if word_placeholder in cell.text:
-                            # Get the value from Excel
-                            if excel_col in df.columns:
-                                value = row[excel_col]
-                                # Check if value is empty or NaN
-                                if pd.notna(value) and value != "":
-                                    formatted_value = str(value)
-                                    # Replace the placeholder with the formatted value
-                                    cell.text = cell.text.replace(word_placeholder, formatted_value)
-
-        # Get employee ID for naming files
-        emp_id = str(row['Emp ID'])
-        safe_emp_id = re.sub(r'[^\w\s-]', '', emp_id).strip().replace(' ', '_')
-
-        # Save the document with employee ID as name
-        doc_path = os.path.join(docs_folder, f"{safe_emp_id}.docx")
-        doc.save(doc_path)
-        generated_files.append(doc_path)
-
-        print(f"Generated document for employee ID: {emp_id}")
-
-    # Create a single zip file containing all documents
+    # Create ZIP file
     if zip_name is None:
         today = datetime.datetime.now().strftime("%Y%m%d")
         zip_name = f"employee_documents_{today}.zip"
-
+    
     zip_path = os.path.join(output_folder, zip_name)
+    
+    # Helper function to replace placeholders in paragraphs and table cells
+    def replace_placeholders(element, replacements):
+        for key, value in replacements.items():
+            if key in element.text:
+                element.text = element.text.replace(key, value)
+    
+    # Process in batches
+    total_employees = len(df)
     with zipfile.ZipFile(zip_path, 'w') as zipf:
-        for file in generated_files:
-            # Add file to zip with just the filename (not the full path)
-            filename = os.path.basename(file)
-            zipf.write(file, arcname=filename)
-
-    print(f"Processed {len(df)} employees. All documents saved in single zip file: {zip_path}")
-
-    # Optionally remove the temporary folder with individual files
-    import shutil
-    shutil.rmtree(docs_folder)
-
+        for start_idx in range(0, total_employees, batch_size):
+            end_idx = min(start_idx + batch_size, total_employees)
+            batch = df.iloc[start_idx:end_idx]
+            
+            print(f"Processing batch {start_idx//batch_size + 1}: employees {start_idx+1} to {end_idx}")
+            
+            # Process each employee in the batch
+            for _, row in batch.iterrows():
+                # Create a deep copy of the template for each employee
+                doc = deepcopy(template_doc)
+                
+                # Prepare all replacements at once
+                replacements = {
+                    '[Date]': current_date
+                }
+                
+                # Add employee-specific replacements
+                for excel_col, word_placeholder in placeholder_mapping.items():
+                    if excel_col in df.columns:
+                        value = row[excel_col]
+                        if pd.notna(value) and value != "":
+                            replacements[word_placeholder] = str(value)
+                
+                # Apply replacements to paragraphs
+                for paragraph in doc.paragraphs:
+                    replace_placeholders(paragraph, replacements)
+                
+                # Apply replacements to tables
+                for table in doc.tables:
+                    for table_row in table.rows:
+                        for cell in table_row.cells:
+                            # Process cell text directly
+                            for p in cell.paragraphs:
+                                replace_placeholders(p, replacements)
+                
+                # Get employee ID for naming files
+                emp_id = str(row['Emp ID'])
+                safe_emp_id = re.sub(r'[^\w\s-]', '', emp_id).strip().replace(' ', '_')
+                
+                # Save document directly to a temporary file
+                doc_path = os.path.join(docs_folder, f"{safe_emp_id}.docx")
+                doc.save(doc_path)
+                
+                # Add to zip file immediately
+                zipf.write(doc_path, arcname=f"{safe_emp_id}.docx")
+                
+                # Remove the temporary file right away
+                os.remove(doc_path)
+                
+                print(f"  Processed employee ID: {emp_id}")
+    
+    # Cleanup the temp folder
+    if os.path.exists(docs_folder):
+        shutil.rmtree(docs_folder)
+    
+    print(f"Processed {total_employees} employees. All documents saved in single zip file: {zip_path}")
     return zip_path
 
 # Example usage

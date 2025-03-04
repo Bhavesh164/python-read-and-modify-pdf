@@ -15,8 +15,8 @@ import secrets
 from typing import Dict, Optional
 import jwt
 from datetime import timedelta
-import os
 from passlib.context import CryptContext
+import concurrent.futures
 
 # Initialize FastAPI app
 app = FastAPI(title="PDF Document Processor", description="API for processing employee documents")
@@ -327,11 +327,11 @@ def replace_text_in_pdf(pdf_path, replacements, output_pdf):
 
                 # Calculate the baseline position of the placeholder text
                 baseline_x = inst.x0  # Left edge of the placeholder
-                baseline_y = inst.y1 - 4  # Adjust for baseline alignment (4 is a small offset for better alignment)
+                baseline_y = inst.y1 - 4  # Adjust for baseline alignment
 
                 # Special handling for [Employee Type] if needed
                 if key == "[Employee Type]":
-                    baseline_y = inst.y1 - 2  # Adjust offset specifically for this placeholder
+                    baseline_y = inst.y1 - 2  # Specific adjustment
 
                 # Insert the new text at the same position
                 page.insert_text(
@@ -345,15 +345,39 @@ def replace_text_in_pdf(pdf_path, replacements, output_pdf):
     doc.save(output_pdf)
     doc.close()
 
-def merge_employee_data_and_zip(excel_file_path, pdf_template, output_folder, zip_name=None, batch_size=50):
+def process_record(row_dict, pdf_template, docs_folder, current_date, placeholder_mapping):
+    """
+    Helper function to process a single record.
+    It creates the replacements, calls replace_text_in_pdf, and returns the output file paths.
+    """
+    replacements = {'[Date]': current_date}
+    for pdf_placeholder, excel_col in placeholder_mapping.items():
+        value = row_dict.get(excel_col, "N/A")
+        if pd.notna(value) and value != "":
+            replacements[pdf_placeholder] = str(value)
+        else:
+            replacements[pdf_placeholder] = "N/A"
+
+    emp_id = str(row_dict.get('Emp ID', ''))
+    safe_emp_id = re.sub(r'[^\w\s-]', '', emp_id).strip().replace(' ', '_')
+    emp_name = str(row_dict.get('Name', ''))
+    safe_emp_name = re.sub(r'[^\w\s-]', '', emp_name).strip().replace(' ', '_')
+    file_name = safe_emp_id + "_" + safe_emp_name
+    pdf_output_path = os.path.join(docs_folder, f"{file_name}.pdf")
+
+    replace_text_in_pdf(pdf_template, replacements, pdf_output_path)
+    return pdf_output_path, f"{file_name}.pdf"
+
+def merge_employee_data_and_zip(excel_file_path, pdf_template, output_folder, zip_name=None):
     """
     Read employee data from Excel, replace placeholders in PDF document,
     and create a single zip file containing all documents.
+    This version processes each record concurrently.
     """
     os.makedirs(output_folder, exist_ok=True)
     df = pd.read_excel(excel_file_path)
 
-    # Verify these column names match your Excel file's actual column names
+    # Define the mapping between PDF placeholders and Excel columns
     placeholder_mapping = {
         '[Employee ID]': 'Emp ID',
         '[Name]': 'Name',
@@ -386,32 +410,16 @@ def merge_employee_data_and_zip(excel_file_path, pdf_template, output_folder, zi
         zip_name = f"employee_documents_{today}.zip"
     zip_path = os.path.join(output_folder, zip_name)
 
-    total_employees = len(df)
-
+    # Use a ProcessPoolExecutor to process each record concurrently
     with zipfile.ZipFile(zip_path, 'w') as zipf:
-        for start_idx in range(0, total_employees, batch_size):
-            end_idx = min(start_idx + batch_size, total_employees)
-            batch = df.iloc[start_idx:end_idx]
-
-            for _, row in batch.iterrows():
-                replacements = {'[Date]': current_date}
-                for pdf_placeholder, excel_col in placeholder_mapping.items():
-                    if excel_col in df.columns:
-                        value = row[excel_col]
-                        if pd.notna(value) and value != "":
-                            replacements[pdf_placeholder] = str(value)
-                        else:
-                            replacements[pdf_placeholder] = "N/A"  # Handle missing data
-
-                emp_id = str(row['Emp ID'])
-                safe_emp_id = re.sub(r'[^\w\s-]', '', emp_id).strip().replace(' ', '_')
-                emp_name = str(row['Name'])
-                safe_emp_name = re.sub(r'[^\w\s-]', '', emp_name).strip().replace(' ', '_')
-                file_name = safe_emp_id+"_"+safe_emp_name
-                pdf_output_path = os.path.join(docs_folder, f"{file_name}.pdf")
-
-                replace_text_in_pdf(pdf_template, replacements, pdf_output_path)
-                zipf.write(pdf_output_path, arcname=f"{file_name}.pdf")
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            futures = []
+            for _, row in df.iterrows():
+                # Pass the row as a dictionary to the helper function
+                futures.append(executor.submit(process_record, row.to_dict(), pdf_template, docs_folder, current_date, placeholder_mapping))
+            for future in concurrent.futures.as_completed(futures):
+                pdf_output_path, arcname = future.result()
+                zipf.write(pdf_output_path, arcname=arcname)
                 os.remove(pdf_output_path)
 
     if os.path.exists(docs_folder):
@@ -480,16 +488,13 @@ async def upload_files(
             }
         )
 
-
-    # Save uploaded files temporarily
+    # Save uploaded file temporarily
     excel_path = os.path.join(UPLOAD_DIR, excel_file.filename)
 
     try:
-        # Save the uploaded files
         with open(excel_path, "wb") as f:
             f.write(await excel_file.read())
 
-        # Process the files
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         zip_filename = f"employee_documents_{timestamp}.zip"
         zip_path = merge_employee_data_and_zip(
@@ -499,7 +504,6 @@ async def upload_files(
             zip_name=zip_filename
         )
 
-        # Return the ZIP file
         return FileResponse(
             path=zip_path,
             filename=zip_filename,
@@ -514,13 +518,11 @@ async def upload_files(
                 "error": f"Error processing files: {str(e)}"
             }
         )
-
     finally:
-        # Clean up temporary files
         if os.path.exists(excel_path):
             os.remove(excel_path)
 
-# Register the startup event handler and  Create templates when app starts
+# Register the startup event handler and create templates when app starts
 app.add_event_handler("startup", create_template_files)
 
 if __name__ == "__main__":

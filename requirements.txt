@@ -4,3 +4,10 @@ python-docx
 pdfplumber 
 pymupdf
 boto3
+fastapi
+uvicorn 
+pyjwt 
+passlib 
+python-multipart
+bcrypt
+jinja2

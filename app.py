@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form, status, Request
+from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form, status, Request, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -472,6 +472,7 @@ async def logout():
 @app.post("/upload")
 async def upload_files(
     request: Request,
+    background_tasks: BackgroundTasks,  # Add background tasks dependency
     excel_file: UploadFile = File(...),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -503,6 +504,9 @@ async def upload_files(
             OUTPUT_DIR,
             zip_name=zip_filename
         )
+
+        # Schedule deletion of the ZIP file after sending response
+        background_tasks.add_task(os.remove, zip_path)
 
         return FileResponse(
             path=zip_path,

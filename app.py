@@ -345,18 +345,78 @@ def replace_text_in_pdf(pdf_path, replacements, output_pdf):
     doc.save(output_pdf)
     doc.close()
 
+def format_indian_currency(value):
+    """
+    Format a numeric value in Indian currency style with INR prefix.
+
+    Args:
+        value (float or int or str): Numeric value to format
+
+    Returns:
+        str: Formatted currency string with INR prefix
+    """
+    try:
+        # Convert to float, handling potential string inputs
+        numeric_value = float(value)
+
+        # Special handling for zero
+        if numeric_value == 0:
+            return "INR 0.00"
+
+        # Convert to string with two decimal places
+        whole_number = f"{numeric_value:,.2f}".split('.')[0].replace(',', '')
+        decimal_part = f"{numeric_value:,.2f}".split('.')[1]
+
+        # Custom formatting for Indian number system
+        if len(whole_number) <= 3:
+            return f"INR {whole_number}.{decimal_part}"
+
+        # Reverse the number to make grouping easier
+        reversed_num = whole_number[::-1]
+
+        # Create groups
+        groups = []
+        for i in range(0, len(reversed_num), 3):
+            groups.append(reversed_num[i:i+3])
+
+        # Reconstruct with proper comma placement
+        if len(groups) == 2:
+            formatted_whole = f"{groups[1][::-1]},{groups[0][::-1]}"
+        elif len(groups) == 3:
+            formatted_whole = f"{groups[2][::-1]},{groups[1][::-1]},{groups[0][::-1]}"
+        elif len(groups) == 4:
+            formatted_whole = f"{groups[3][::-1]},{groups[2][::-1]},{groups[1][::-1]},{groups[0][::-1]}"
+        else:
+            # Fallback for unexpected lengths
+            formatted_whole = whole_number
+
+        return f"INR {formatted_whole}.{decimal_part}"
+
+    except (ValueError, TypeError):
+        return "INR N/A"
+
 def process_record(row_dict, pdf_template, docs_folder, current_date, placeholder_mapping):
     """
-    Helper function to process a single record.
-    It creates the replacements, calls replace_text_in_pdf, and returns the output file paths.
+    Helper function to process a single record with Indian currency formatting.
     """
     replacements = {'[Date]': current_date}
     for pdf_placeholder, excel_col in placeholder_mapping.items():
         value = row_dict.get(excel_col, "N/A")
-        if pd.notna(value) and value != "":
-            replacements[pdf_placeholder] = str(value)
+
+        # Special handling for numeric/currency columns
+        currency_columns = [
+            '2024 Bonus', 'Basic Salary', 'HRA', 'Other Allowences',
+            'Provident Fund', 'Company Deposit', 'Total Fixed',
+            'Bonus 2025 (At Target)', 'Total CTC'
+        ]
+
+        if excel_col in currency_columns:
+            replacements[pdf_placeholder] = format_indian_currency(value)
         else:
-            replacements[pdf_placeholder] = "N/A"
+            if pd.notna(value) and value != "":
+                replacements[pdf_placeholder] = str(value)
+            else:
+                replacements[pdf_placeholder] = "N/A"
 
     emp_id = str(row_dict.get('Emp ID', ''))
     safe_emp_id = re.sub(r'[^\w\s-]', '', emp_id).strip().replace(' ', '_')

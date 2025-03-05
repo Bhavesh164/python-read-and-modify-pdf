@@ -313,17 +313,33 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
     return current_user
 
 # PDF processing functions
-def replace_text_in_pdf(pdf_path, replacements, output_pdf,texts_to_remove):
+def replace_text_in_pdf(pdf_path, replacements, output_pdf,texts_to_remove, dynamic_column_value, bonus_column_value, bonus_column_value2):
     """Replace placeholders in a PDF by redacting old text and inserting new text at the exact position."""
     doc = fitz.open(pdf_path)
 
-     # Add these specific texts to be removed
-    # texts_to_remove = {
-    #     "J.": "J.          Not Applicable",
-    #     "[For SDRs only] Your 2025 MBO Individual sales booking Target is $[3 or 4] million.  See": "'",
-    #     "Appendix A, Section III for more details": "",
-    #     "[Any other employee-specific details that need to be covered in Appraisal Letter]": "Not Applicable"
-    # }
+    # Handle special replacements based on dynamic_column_value
+    if dynamic_column_value == 'sdr':
+        replacements['[-]'] = '=>'
+        replacements['[--]'] = ''
+    elif dynamic_column_value == 'comments':
+        replacements['[--]'] = '=>'
+        replacements['[-]'] = ''
+    elif dynamic_column_value == 'both':
+        replacements['[--]'] = '=>'
+        replacements['[-]'] = '=>'
+    else:
+        replacements['[--]'] = ''
+        replacements['[-]'] = ''
+
+    # Handle bonus value
+    if bonus_column_value is None:
+        replacements['[Bonus in INR]'] = ''
+        replacements['II.'] = 'I.'
+        replacements['I.'] = ''
+        replacements['Your 2024 Bonus is'] = ''
+    if bonus_column_value2 is None:
+        replacements['=> Bonus (at Target)3'] = ''
+        replacements['[Target in INR]'] = ''
 
     for page in doc:
         for key, value in replacements.items():
@@ -439,38 +455,50 @@ def process_record(row_dict, pdf_template, docs_folder, current_date, placeholde
     # Get SDR and Comments values
     sdr_value = str(row_dict.get('For SDR only', '')).strip()
     comments_value = str(row_dict.get('Comments (Optional)', '')).strip()
+    bonus_value = str(row_dict.get('2024 Bonus', '')).strip()
+    bonus_value_2 = str(row_dict.get('Bonus 2025 (At Target)', '')).strip()
 
     print(f"SDR Value: '{sdr_value}'")  # Debug print
     print(f"Comments Value: '{comments_value}'")  # Debug print
 
     # Initialize texts_to_remove dictionary
     texts_to_remove = {}
+    dynamic_column_value = 'both'
+    bonus_column_value = 'fill'
+    bonus_column_value2 = 'fill'
 
     # Check if SDR value exists and is not empty/nan
     if sdr_value.lower() not in ['nan', '', 'na', 'n/a'] and not pd.isna(row_dict.get('For SDR only')) and \
          (comments_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Comments (Optional)'))):
+        dynamic_column_value = 'sdr'
         texts_to_remove = {
             "[For SDRs only]": str(sdr_value),
-            "[Any other employee-specific details that need to be covered in Appraisal Letter]": "Not Applicable"
+            "[Any other employee-specific details that need to be covered in Appraisal Letter]": ""
         }
     # Check if Comments value exists but SDR is empty
     elif (comments_value.lower() not in ['nan', '', 'na', 'n/a'] and not pd.isna(row_dict.get('Comments (Optional)'))) and \
          (sdr_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('For SDR only'))):
+        dynamic_column_value = 'comments'
         texts_to_remove = {
-            "J.": "J.          Not Applicable",
-            "[For SDRs only] Your 2025 MBO Individual sales booking Target is $[3 or 4] million.  See": "'",
-            "Appendix A, Section III for more details": "",
             "[Any other employee-specific details that need to be covered in Appraisal Letter]": str(comments_value)
         }
     # If both SDR and Comments are empty/nan
     elif (sdr_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('For SDR only'))) and \
          (comments_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Comments (Optional)'))):
+        dynamic_column_value = 'none'
         texts_to_remove = {
-            "J.": "J.          Not Applicable",
-            "[For SDRs only] Your 2025 MBO Individual sales booking Target is $[3 or 4] million.  See": "'",
-            "Appendix A, Section III for more details": "",
-            "[Any other employee-specific details that need to be covered in Appraisal Letter]": "Not Applicable"
+            "[Any other employee-specific details that need to be covered in Appraisal Letter]": ""
         }
+
+    # If bonus 2024 are empty/nan
+    if (bonus_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('2024 Bonus'))):
+        bonus_column_value = None
+    # If bonus 2025 at target are empty/nan
+    if (bonus_value_2.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Bonus 2025 (At Target)'))):
+        bonus_column_value2 = None
+
+
+
 
     for pdf_placeholder, excel_col in placeholder_mapping.items():
         value = row_dict.get(excel_col, "N/A")
@@ -488,7 +516,7 @@ def process_record(row_dict, pdf_template, docs_folder, current_date, placeholde
             if pd.notna(value) and value != "":
                 replacements[pdf_placeholder] = str(value)
             else:
-                replacements[pdf_placeholder] = "N/A"
+                replacements[pdf_placeholder] = "" # empty the placeholder values
 
     emp_id = str(row_dict.get('Emp ID', ''))
     safe_emp_id = re.sub(r'[^\w\s-]', '', emp_id).strip().replace(' ', '_')
@@ -497,7 +525,7 @@ def process_record(row_dict, pdf_template, docs_folder, current_date, placeholde
     file_name = safe_emp_id + "_" + safe_emp_name
     pdf_output_path = os.path.join(docs_folder, f"{file_name}.pdf")
 
-    replace_text_in_pdf(pdf_template, replacements, pdf_output_path, texts_to_remove)
+    replace_text_in_pdf(pdf_template, replacements, pdf_output_path, texts_to_remove, dynamic_column_value, bonus_column_value, bonus_column_value2)
     return pdf_output_path, f"{file_name}.pdf"
 
 def merge_employee_data_and_zip(excel_file_path, pdf_template, output_folder, zip_name=None):

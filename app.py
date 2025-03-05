@@ -313,7 +313,7 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
     return current_user
 
 # PDF processing functions
-def replace_text_in_pdf(pdf_path, replacements, output_pdf,texts_to_remove, dynamic_column_value, bonus_column_value, bonus_column_value2):
+def replace_text_in_pdf(pdf_path, replacements, output_pdf, texts_to_remove, dynamic_column_value, bonus_column_value, bonus_column_value2):
     """Replace placeholders in a PDF by redacting old text and inserting new text at the exact position."""
     doc = fitz.open(pdf_path)
 
@@ -331,179 +331,153 @@ def replace_text_in_pdf(pdf_path, replacements, output_pdf,texts_to_remove, dyna
         replacements['[--]'] = ''
         replacements['[-]'] = ''
 
-    # Handle bonus value
-    if bonus_column_value is None:
+    # Handle bonus values
+    if bonus_column_value is None or replacements.get('[Bonus in INR]', '') == '':
         replacements['[Bonus in INR]'] = ''
-        replacements['II.'] = 'I.'
+        replacements['II'] = 'I'
         replacements['I.'] = ''
         replacements['Your 2024 Bonus is'] = ''
-    if bonus_column_value2 is None:
+
+    if bonus_column_value2 is None or replacements.get('[Target in INR]', '') == '':
         replacements['=> Bonus (at Target)3'] = ''
         replacements['[Target in INR]'] = ''
 
+    # Combine replacements with texts_to_remove
+    all_replacements = {**replacements, **texts_to_remove}
+
     for page in doc:
-        for key, value in replacements.items():
+        for key, value in all_replacements.items():
             text_instances = page.search_for(key)
+
             for inst in text_instances:
-                # Redact the placeholder text
-                page.add_redact_annot(inst, text="", fill=(1, 1, 1))  # White fill
+                # First redact the original text
+                page.add_redact_annot(inst, text="", fill=(1, 1, 1))
                 page.apply_redactions()
 
-                # Calculate the baseline position of the placeholder text
-                baseline_x = inst.x0  # Left edge of the placeholder
-                baseline_y = inst.y1 - 4  # Adjust for baseline alignment
+                # Then insert the new text with specified font properties
+                if value:
+                    baseline_x = inst.x0
+                    baseline_y = inst.y1 - 4  # Default offset
 
-                # Special handling for [Employee Type] if needed
-                if key == "[Employee Type]":
-                    baseline_y = inst.y1 - 2  # Specific adjustment
+                    # Adjust baseline for Employee Type
+                    if key == "[Employee Type]":
+                        baseline_y = inst.y1 - 2
 
-                # Insert the new text at the same position
-                page.insert_text(
-                    (baseline_x, baseline_y),
-                    value,
-                    fontsize=10,  # Adjust to match your template's font size
-                    color=(0, 0, 0),
-                    fontname="helv",  # Adjust to match your template's font if known
-                )
-
-            # Get all text blocks on the page
-            blocks = page.get_text("blocks")
-            if texts_to_remove:
-                # Handle specific text replacements
-                for block in blocks:
-                    block_text = block[4].strip()  # Get the text content of the block
-                    for text, replacement in texts_to_remove.items():
-                        # Check if the block exactly matches the text to remove/replace
-                        if block_text == text:
-                            # Create rectangle from block coordinates
-                            rect = fitz.Rect(block[:4])
-                            # Redact the original text
-                            page.add_redact_annot(rect, text="", fill=(1, 1, 1))
-                            page.apply_redactions()
-
-                            # If there's a replacement text (not empty string), insert it
-                            if replacement:
-                                baseline_x = rect.x0
-                                baseline_y = rect.y1 - 4  # Adjust baseline for text alignment
-                                page.insert_text(
-                                    (baseline_x, baseline_y),
-                                    replacement,
-                                    fontsize=10,
-                                    color=(0, 0, 0),
-                                    fontname="helv"
-                                )
-
+                    # Special handling for 'II' replacement
+                    if key == 'II.':
+                        page.insert_text(
+                            point=(baseline_x, baseline_y - 2),
+                            text=value,
+                            fontsize=11,
+                            fontname="helv-b",  # Bold Helvetica
+                            color=(0, 0, 0)
+                        )
+                    else:
+                        page.insert_text(
+                            point=(baseline_x, baseline_y),
+                            text=value,
+                            fontsize=10,
+                            fontname="helv",  # Regular Helvetica
+                            color=(0, 0, 0)
+                        )
 
     doc.save(output_pdf)
     doc.close()
 
 def format_indian_currency(value):
-    """
-    Format a numeric value in Indian currency style with INR prefix.
-    Examples: 1,000; 10,000; 1,00,000; 10,00,000; 1,00,00,000
-
-    Args:
-        value (float or int or str): Numeric value to format
-
-    Returns:
-        str: Formatted currency string with INR prefix
-    """
+    """Format a numeric value in Indian currency style with INR prefix."""
     try:
+        # Handle empty or invalid values
+        if pd.isna(value) or str(value).strip().lower() in ['nan', '', 'na', 'n/a']:
+            return ""
+
         # Convert to float, handling potential string inputs
-        numeric_value = float(value)
+        numeric_value = float(str(value).replace(',', '').strip())
 
         # Special handling for zero
         if numeric_value == 0:
             return "INR 0.00"
 
         # Convert to string with two decimal places
-        whole_number = f"{numeric_value:,.2f}".split('.')[0].replace(',', '')
-        decimal_part = f"{numeric_value:,.2f}".split('.')[1]
+        formatted = f"{numeric_value:,.2f}"
+
+        # Return early if formatting fails
+        if '.' not in formatted:
+            return ""
+
+        whole_number = formatted.split('.')[0].replace(',', '')
+        decimal_part = formatted.split('.')[1]
 
         # Handle numbers less than 1000
         if len(whole_number) <= 3:
             return f"INR {whole_number}.{decimal_part}"
 
         # Format according to Indian numbering system
-        # First, get the last 3 digits
         last_three = whole_number[-3:]
-        # Get remaining digits
         remaining = whole_number[:-3]
 
-        # Group remaining digits by 2 from right
         groups = []
         while remaining:
             groups.append(remaining[-2:] if len(remaining) >= 2 else remaining)
             remaining = remaining[:-2]
 
-        # Combine all parts
         formatted_whole = last_three
         if groups:
             formatted_whole = ','.join(groups[::-1]) + ',' + formatted_whole
 
         return f"INR {formatted_whole}.{decimal_part}"
 
-    except (ValueError, TypeError):
-        return "INR N/A"
+    except (ValueError, TypeError, IndexError, AttributeError):
+        return ""
 
 def process_record(row_dict, pdf_template, docs_folder, current_date, placeholder_mapping):
-    """
-    Helper function to process a single record with Indian currency formatting.
-    """
+    """Helper function to process a single record with Indian currency formatting."""
     replacements = {'[Date]': current_date}
 
     # Get SDR and Comments values
     sdr_value = str(row_dict.get('For SDR only', '')).strip()
     comments_value = str(row_dict.get('Comments (Optional)', '')).strip()
+
+    # Handle bonus values safely
     bonus_value = str(row_dict.get('2024 Bonus', '')).strip()
     bonus_value_2 = str(row_dict.get('Bonus 2025 (At Target)', '')).strip()
 
-    print(f"SDR Value: '{sdr_value}'")  # Debug print
-    print(f"Comments Value: '{comments_value}'")  # Debug print
-
-    # Initialize texts_to_remove dictionary
+    # Initialize values
     texts_to_remove = {}
     dynamic_column_value = 'both'
     bonus_column_value = 'fill'
     bonus_column_value2 = 'fill'
 
-    # Check if SDR value exists and is not empty/nan
-    if sdr_value.lower() not in ['nan', '', 'na', 'n/a'] and not pd.isna(row_dict.get('For SDR only')) and \
-         (comments_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Comments (Optional)'))):
+    # Handle SDR and Comments logic
+    if sdr_value.lower() not in ['nan', '', 'na', 'n/a'] and not pd.isna(row_dict.get('For SDR only')):
         dynamic_column_value = 'sdr'
         texts_to_remove = {
             "[For SDRs only]": str(sdr_value),
             "[Any other employee-specific details that need to be covered in Appraisal Letter]": ""
         }
-    # Check if Comments value exists but SDR is empty
-    elif (comments_value.lower() not in ['nan', '', 'na', 'n/a'] and not pd.isna(row_dict.get('Comments (Optional)'))) and \
-         (sdr_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('For SDR only'))):
+    elif comments_value.lower() not in ['nan', '', 'na', 'n/a'] and not pd.isna(row_dict.get('Comments (Optional)')):
         dynamic_column_value = 'comments'
         texts_to_remove = {
             "[Any other employee-specific details that need to be covered in Appraisal Letter]": str(comments_value)
         }
-    # If both SDR and Comments are empty/nan
-    elif (sdr_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('For SDR only'))) and \
-         (comments_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Comments (Optional)'))):
+    else:
         dynamic_column_value = 'none'
         texts_to_remove = {
             "[Any other employee-specific details that need to be covered in Appraisal Letter]": ""
         }
 
-    # If bonus 2024 are empty/nan
-    if (bonus_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('2024 Bonus'))):
+    # Handle bonus values
+    if bonus_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('2024 Bonus')):
         bonus_column_value = None
-    # If bonus 2025 at target are empty/nan
-    if (bonus_value_2.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Bonus 2025 (At Target)'))):
+
+    if bonus_value_2.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Bonus 2025 (At Target)')):
         bonus_column_value2 = None
 
-
-
-
+    # Process all replacements
     for pdf_placeholder, excel_col in placeholder_mapping.items():
         value = row_dict.get(excel_col, "N/A")
 
-        # Special handling for numeric/currency columns
+        # Special handling for currency columns
         currency_columns = [
             '2024 Bonus', 'Basic Salary', 'HRA', 'Other Allowences',
             'Provident Fund', 'Company Deposit', 'Total Fixed',
@@ -511,13 +485,15 @@ def process_record(row_dict, pdf_template, docs_folder, current_date, placeholde
         ]
 
         if excel_col in currency_columns:
-            replacements[pdf_placeholder] = format_indian_currency(value)
+            formatted_value = format_indian_currency(value)
+            replacements[pdf_placeholder] = formatted_value
         else:
-            if pd.notna(value) and value != "":
+            if pd.notna(value) and str(value).strip() != "":
                 replacements[pdf_placeholder] = str(value)
             else:
-                replacements[pdf_placeholder] = "" # empty the placeholder values
+                replacements[pdf_placeholder] = ""
 
+    # Generate output file name
     emp_id = str(row_dict.get('Emp ID', ''))
     safe_emp_id = re.sub(r'[^\w\s-]', '', emp_id).strip().replace(' ', '_')
     emp_name = str(row_dict.get('Name', ''))
@@ -547,7 +523,7 @@ def merge_employee_data_and_zip(excel_file_path, pdf_template, output_folder, zi
         '[Bonus in INR]': '2024 Bonus',
         '[Basic in INR]': 'Basic Salary',
         '[HRA in INR]': 'HRA',
-        '[Other Allowance in INR]': 'Other Allowences',  # Fixed typo
+        '[Other Allowance in INR]': 'Other Allowences',
         '[Provident Fund in INR]': 'Provident Fund',
         '[Company Deposit in INR]': 'Company Deposit',
         '[Total Fixed in INR]': 'Total Fixed',

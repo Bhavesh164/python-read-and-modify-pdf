@@ -313,9 +313,17 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
     return current_user
 
 # PDF processing functions
-def replace_text_in_pdf(pdf_path, replacements, output_pdf):
+def replace_text_in_pdf(pdf_path, replacements, output_pdf,texts_to_remove):
     """Replace placeholders in a PDF by redacting old text and inserting new text at the exact position."""
     doc = fitz.open(pdf_path)
+
+     # Add these specific texts to be removed
+    # texts_to_remove = {
+    #     "J.": "J.          Not Applicable",
+    #     "[For SDRs only] Your 2025 MBO Individual sales booking Target is $[3 or 4] million.  See": "'",
+    #     "Appendix A, Section III for more details": "",
+    #     "[Any other employee-specific details that need to be covered in Appraisal Letter]": "Not Applicable"
+    # }
 
     for page in doc:
         for key, value in replacements.items():
@@ -342,12 +350,41 @@ def replace_text_in_pdf(pdf_path, replacements, output_pdf):
                     fontname="helv",  # Adjust to match your template's font if known
                 )
 
+            # Get all text blocks on the page
+            blocks = page.get_text("blocks")
+            if texts_to_remove:
+                # Handle specific text replacements
+                for block in blocks:
+                    block_text = block[4].strip()  # Get the text content of the block
+                    for text, replacement in texts_to_remove.items():
+                        # Check if the block exactly matches the text to remove/replace
+                        if block_text == text:
+                            # Create rectangle from block coordinates
+                            rect = fitz.Rect(block[:4])
+                            # Redact the original text
+                            page.add_redact_annot(rect, text="", fill=(1, 1, 1))
+                            page.apply_redactions()
+
+                            # If there's a replacement text (not empty string), insert it
+                            if replacement:
+                                baseline_x = rect.x0
+                                baseline_y = rect.y1 - 4  # Adjust baseline for text alignment
+                                page.insert_text(
+                                    (baseline_x, baseline_y),
+                                    replacement,
+                                    fontsize=10,
+                                    color=(0, 0, 0),
+                                    fontname="helv"
+                                )
+
+
     doc.save(output_pdf)
     doc.close()
 
 def format_indian_currency(value):
     """
     Format a numeric value in Indian currency style with INR prefix.
+    Examples: 1,000; 10,000; 1,00,000; 10,00,000; 1,00,00,000
 
     Args:
         value (float or int or str): Numeric value to format
@@ -367,28 +404,26 @@ def format_indian_currency(value):
         whole_number = f"{numeric_value:,.2f}".split('.')[0].replace(',', '')
         decimal_part = f"{numeric_value:,.2f}".split('.')[1]
 
-        # Custom formatting for Indian number system
+        # Handle numbers less than 1000
         if len(whole_number) <= 3:
             return f"INR {whole_number}.{decimal_part}"
 
-        # Reverse the number to make grouping easier
-        reversed_num = whole_number[::-1]
+        # Format according to Indian numbering system
+        # First, get the last 3 digits
+        last_three = whole_number[-3:]
+        # Get remaining digits
+        remaining = whole_number[:-3]
 
-        # Create groups
+        # Group remaining digits by 2 from right
         groups = []
-        for i in range(0, len(reversed_num), 3):
-            groups.append(reversed_num[i:i+3])
+        while remaining:
+            groups.append(remaining[-2:] if len(remaining) >= 2 else remaining)
+            remaining = remaining[:-2]
 
-        # Reconstruct with proper comma placement
-        if len(groups) == 2:
-            formatted_whole = f"{groups[1][::-1]},{groups[0][::-1]}"
-        elif len(groups) == 3:
-            formatted_whole = f"{groups[2][::-1]},{groups[1][::-1]},{groups[0][::-1]}"
-        elif len(groups) == 4:
-            formatted_whole = f"{groups[3][::-1]},{groups[2][::-1]},{groups[1][::-1]},{groups[0][::-1]}"
-        else:
-            # Fallback for unexpected lengths
-            formatted_whole = whole_number
+        # Combine all parts
+        formatted_whole = last_three
+        if groups:
+            formatted_whole = ','.join(groups[::-1]) + ',' + formatted_whole
 
         return f"INR {formatted_whole}.{decimal_part}"
 
@@ -400,6 +435,43 @@ def process_record(row_dict, pdf_template, docs_folder, current_date, placeholde
     Helper function to process a single record with Indian currency formatting.
     """
     replacements = {'[Date]': current_date}
+
+    # Get SDR and Comments values
+    sdr_value = str(row_dict.get('For SDR only', '')).strip()
+    comments_value = str(row_dict.get('Comments (Optional)', '')).strip()
+
+    print(f"SDR Value: '{sdr_value}'")  # Debug print
+    print(f"Comments Value: '{comments_value}'")  # Debug print
+
+    # Initialize texts_to_remove dictionary
+    texts_to_remove = {}
+
+    # Check if SDR value exists and is not empty/nan
+    if sdr_value.lower() not in ['nan', '', 'na', 'n/a'] and not pd.isna(row_dict.get('For SDR only')) and \
+         (comments_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Comments (Optional)'))):
+        texts_to_remove = {
+            "[For SDRs only]": str(sdr_value),
+            "[Any other employee-specific details that need to be covered in Appraisal Letter]": "Not Applicable"
+        }
+    # Check if Comments value exists but SDR is empty
+    elif (comments_value.lower() not in ['nan', '', 'na', 'n/a'] and not pd.isna(row_dict.get('Comments (Optional)'))) and \
+         (sdr_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('For SDR only'))):
+        texts_to_remove = {
+            "J.": "J.          Not Applicable",
+            "[For SDRs only] Your 2025 MBO Individual sales booking Target is $[3 or 4] million.  See": "'",
+            "Appendix A, Section III for more details": "",
+            "[Any other employee-specific details that need to be covered in Appraisal Letter]": str(comments_value)
+        }
+    # If both SDR and Comments are empty/nan
+    elif (sdr_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('For SDR only'))) and \
+         (comments_value.lower() in ['nan', '', 'na', 'n/a'] or pd.isna(row_dict.get('Comments (Optional)'))):
+        texts_to_remove = {
+            "J.": "J.          Not Applicable",
+            "[For SDRs only] Your 2025 MBO Individual sales booking Target is $[3 or 4] million.  See": "'",
+            "Appendix A, Section III for more details": "",
+            "[Any other employee-specific details that need to be covered in Appraisal Letter]": "Not Applicable"
+        }
+
     for pdf_placeholder, excel_col in placeholder_mapping.items():
         value = row_dict.get(excel_col, "N/A")
 
@@ -425,7 +497,7 @@ def process_record(row_dict, pdf_template, docs_folder, current_date, placeholde
     file_name = safe_emp_id + "_" + safe_emp_name
     pdf_output_path = os.path.join(docs_folder, f"{file_name}.pdf")
 
-    replace_text_in_pdf(pdf_template, replacements, pdf_output_path)
+    replace_text_in_pdf(pdf_template, replacements, pdf_output_path, texts_to_remove)
     return pdf_output_path, f"{file_name}.pdf"
 
 def merge_employee_data_and_zip(excel_file_path, pdf_template, output_folder, zip_name=None):
@@ -452,7 +524,9 @@ def merge_employee_data_and_zip(excel_file_path, pdf_template, output_folder, zi
         '[Company Deposit in INR]': 'Company Deposit',
         '[Total Fixed in INR]': 'Total Fixed',
         '[Target in INR]': 'Bonus 2025 (At Target)',
-        '[Total CTC in INR]': 'Total CTC'
+        '[Total CTC in INR]': 'Total CTC',
+        '[For SDRs only]': 'For SDR only',
+        '[Any other employee-specific details that need to be covered in Appraisal Letter]': 'Comments (Optional)'
     }
 
     # Validate required columns

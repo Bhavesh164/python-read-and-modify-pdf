@@ -17,6 +17,11 @@ import jwt
 from datetime import timedelta
 from passlib.context import CryptContext
 import concurrent.futures
+import smtplib
+import os
+from email.message import EmailMessage
+import queue
+import threading
 
 # Initialize FastAPI app
 app = FastAPI(title="PDF Document Processor", description="API for processing employee documents")
@@ -504,64 +509,191 @@ def process_record(row_dict, pdf_template, docs_folder, current_date, placeholde
     replace_text_in_pdf(pdf_template, replacements, pdf_output_path, texts_to_remove, dynamic_column_value, bonus_column_value, bonus_column_value2)
     return pdf_output_path, f"{file_name}.pdf"
 
+def send_office365_email(recipient_email, pdf_path, emp_name):
+    """Worker function to send a single email"""
+    print(f"\nAttempting to send email to {recipient_email}")
+    try:
+        msg = EmailMessage()
+        msg["From"] = "hrd@algoworks.com"
+        msg["To"] = recipient_email
+        msg["Subject"] = "Appraisal Letter"
+        msg.set_content(f"Dear {emp_name},\nPlease find attachment for your appraisal letter.")
+
+        # Attach PDF
+        print(f"Attaching PDF: {pdf_path}")
+        with open(pdf_path, "rb") as f:
+            file_data = f.read()
+            file_name = os.path.basename(pdf_path)
+            msg.add_attachment(file_data, maintype="application", subtype="octet-stream", filename=file_name)
+
+        # Send Email with debug enabled
+        print("Connecting to SMTP server...")
+        with smtplib.SMTP("smtp.office365.com", 587) as server:
+            server.set_debuglevel(1)  # Enable debug output
+            print("Starting TLS...")
+            server.starttls()
+            print("Logging in...")
+            server.login("hrd@algoworks.com", "netscape@1")
+            print("Sending message...")
+            server.send_message(msg)
+            print(f"✓ SUCCESS: Email sent to {recipient_email}")
+            return True
+    except FileNotFoundError:
+        print(f"✗ ERROR: PDF file not found: {pdf_path}")
+        return False
+    except smtplib.SMTPAuthenticationError:
+        print("✗ ERROR: SMTP Authentication failed. Check username and password.")
+        return False
+    except smtplib.SMTPException as e:
+        print(f"✗ ERROR: SMTP error occurred: {str(e)}")
+        return False
+    except Exception as e:
+        print(f"✗ ERROR: Failed to send email to {recipient_email}: {str(e)}")
+        return False
+
+def email_worker(email_queue):
+    """Worker function to process email queue"""
+    print("\nEmail worker started...")
+    emails_processed = 0
+    emails_succeeded = 0
+    emails_failed = 0
+
+    while True:
+        try:
+            email_data = email_queue.get(timeout=30)  # Wait up to 30 seconds for new items
+            if email_data is None:  # Sentinel value to stop worker
+                print("Received stop signal, finishing up...")
+                break
+
+            recipient_email, pdf_path, emp_name = email_data
+            emails_processed += 1
+            print(f"\nProcessing email {emails_processed}...")
+
+            if send_office365_email(recipient_email, pdf_path, emp_name):
+                emails_succeeded += 1
+            else:
+                emails_failed += 1
+
+            email_queue.task_done()
+
+        except queue.Empty:
+            print("Email queue empty, worker finishing...")
+            break
+        except Exception as e:
+            print(f"✗ ERROR in email worker: {str(e)}")
+            emails_failed += 1
+            email_queue.task_done()
+
+    print(f"\nEmail worker finished:")
+    print(f"Total emails processed: {emails_processed}")
+    print(f"Successful: {emails_succeeded}")
+    print(f"Failed: {emails_failed}")
+
+# Define the mapping between PDF placeholders and Excel columns
+placeholder_mapping = {
+    '[Employee ID]': 'Emp ID',
+    '[Name]': 'Name',
+    '[Employee Department]': 'Department',
+    '[Employee Title]': 'Employee Title',
+    '[Employee Type]': 'Employee Type',
+    '[Bonus in INR]': '2024 Bonus',
+    '[Basic in INR]': 'Basic Salary',
+    '[HRA in INR]': 'HRA',
+    '[Other Allowance in INR]': 'Other Allowences',
+    '[Provident Fund in INR]': 'Provident Fund',
+    '[Company Deposit in INR]': 'Company Deposit',
+    '[Total Fixed in INR]': 'Total Fixed',
+    '[Target in INR]': 'Bonus 2025 (At Target)',
+    '[Total CTC in INR]': 'Total CTC',
+    '[For SDRs only]': 'For SDR only',
+    '[Any other employee-specific details that need to be covered in Appraisal Letter]': 'Comments (Optional)'
+}
+
 def merge_employee_data_and_zip(excel_file_path, pdf_template, output_folder, zip_name=None):
-    """
-    Read employee data from Excel, replace placeholders in PDF document,
-    and create a single zip file containing all documents.
-    This version processes each record concurrently.
-    """
+    """Main function to process Excel and create ZIP"""
+    print("\nStarting merge and zip process...")
     os.makedirs(output_folder, exist_ok=True)
     df = pd.read_excel(excel_file_path)
-
-    # Define the mapping between PDF placeholders and Excel columns
-    placeholder_mapping = {
-        '[Employee ID]': 'Emp ID',
-        '[Name]': 'Name',
-        '[Employee Department]': 'Department',
-        '[Employee Title]': 'Employee Title',
-        '[Employee Type]': 'Employee Type',
-        '[Bonus in INR]': '2024 Bonus',
-        '[Basic in INR]': 'Basic Salary',
-        '[HRA in INR]': 'HRA',
-        '[Other Allowance in INR]': 'Other Allowences',
-        '[Provident Fund in INR]': 'Provident Fund',
-        '[Company Deposit in INR]': 'Company Deposit',
-        '[Total Fixed in INR]': 'Total Fixed',
-        '[Target in INR]': 'Bonus 2025 (At Target)',
-        '[Total CTC in INR]': 'Total CTC',
-        '[For SDRs only]': 'For SDR only',
-        '[Any other employee-specific details that need to be covered in Appraisal Letter]': 'Comments (Optional)'
-    }
-
-    # Validate required columns
-    required_columns = list(placeholder_mapping.values())
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        raise ValueError(f"Excel file is missing required columns: {', '.join(missing_columns)}")
-
-    current_date = datetime.datetime.now().strftime("%B %d, %Y")
-    docs_folder = os.path.join(output_folder, "temp_pdfs")
-    os.makedirs(docs_folder, exist_ok=True)
 
     if zip_name is None:
         today = datetime.datetime.now().strftime("%Y%m%d")
         zip_name = f"employee_documents_{today}.zip"
     zip_path = os.path.join(output_folder, zip_name)
 
-    # Use a ProcessPoolExecutor to process each record concurrently
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            futures = []
-            for _, row in df.iterrows():
-                # Pass the row as a dictionary to the helper function
-                futures.append(executor.submit(process_record, row.to_dict(), pdf_template, docs_folder, current_date, placeholder_mapping))
-            for future in concurrent.futures.as_completed(futures):
-                pdf_output_path, arcname = future.result()
-                zipf.write(pdf_output_path, arcname=arcname)
-                os.remove(pdf_output_path)
+    docs_folder = os.path.join(output_folder, "temp_pdfs")
+    os.makedirs(docs_folder, exist_ok=True)
 
-    if os.path.exists(docs_folder):
-        shutil.rmtree(docs_folder)
+    # Keep track of files to email
+    email_tasks = []
+    generated_pdfs = []
+
+    try:
+        # First, generate all PDFs and create ZIP
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            for _, row in df.iterrows():
+                # Process single record
+                pdf_output_path, arcname = process_record(
+                    row.to_dict(),
+                    pdf_template,
+                    docs_folder,
+                    datetime.datetime.now().strftime("%B %d, %Y"),
+                    placeholder_mapping
+                )
+
+                # Add to ZIP
+                zipf.write(pdf_output_path, arcname=arcname)
+                generated_pdfs.append(pdf_output_path)
+
+                # Store email task if Email Id exists
+                email = row.get('Email Id')
+                if pd.notna(email) and email.strip():
+                    email_tasks.append((email.strip(), pdf_output_path, row['Name']))
+
+        # Now that all PDFs are generated, start email process
+        if email_tasks:
+            # Create email queue and start worker thread
+            email_queue = queue.Queue()
+            print("\nStarting email worker thread...")
+            email_thread = threading.Thread(
+                target=email_worker,
+                args=(email_queue,),
+                daemon=True
+            )
+            email_thread.start()
+
+            # Queue all email tasks
+            for email_task in email_tasks:
+                print(f"\nQueuing email for: {email_task[0]}")
+                email_queue.put(email_task)
+
+            # Signal email worker to stop
+            print("Adding stop signal to email queue...")
+            email_queue.put(None)
+
+            # Wait for email worker to finish (with timeout)
+            print("Waiting for email worker to finish...")
+            email_thread.join(timeout=120)  # Increased timeout to 2 minutes
+
+    except Exception as e:
+        print(f"Error during processing: {str(e)}")
+        raise
+    finally:
+        # Clean up PDF files only after emails are sent
+        for pdf_file in generated_pdfs:
+            if os.path.exists(pdf_file):
+                try:
+                    os.remove(pdf_file)
+                except Exception as e:
+                    print(f"Warning: Could not delete temporary file {pdf_file}: {str(e)}")
+
+        # Clean up temp folder
+        try:
+            if os.path.exists(docs_folder):
+                shutil.rmtree(docs_folder)
+        except Exception as e:
+            print(f"Warning: Could not delete temporary folder {docs_folder}: {str(e)}")
+
+    print("\nZIP file created successfully.")
     return zip_path
 
 # Save HTML templates
@@ -669,4 +801,4 @@ app.add_event_handler("startup", create_template_files)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8081)
